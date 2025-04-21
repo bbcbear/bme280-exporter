@@ -1,92 +1,84 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"net/http"
-	"path"
-	"strconv"
+	"sync"
+	"time"
 
-	"github.com/gorilla/mux"
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/quhar/bme280"
 	"golang.org/x/exp/io/i2c"
 )
 
-var (
-	tempGauge = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "bme280_temperature_celsius",
-			Help: "Temperature in celsius degree",
-		},
-		[]string{"device", "register"},
-	)
-	pressGauge = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "bme280_pressure_hpa",
-			Help: "Barometric pressure in hPa",
-		},
-		[]string{"device", "register"},
-	)
-	humidityGauge = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "bme280_humidity",
-			Help: "Humidity in percentage of relative humidity",
-		},
-		[]string{"device", "register"},
-	)
-)
-
-func main() {
-	r := mux.NewRouter()
-	r.Use(bme280collector)
-	r.Handle("/metrics/{device}/{register}", promhttp.Handler())
-
-	if err := prometheus.Register(tempGauge); err != nil {
-		panic(err)
-	}
-	if err := prometheus.Register(pressGauge); err != nil {
-		panic(err)
-	}
-	if err := prometheus.Register(humidityGauge); err != nil {
-		panic(err)
-	}
-
-	log.Fatal(http.ListenAndServe(":8080", r))
+type SensorData struct {
+	T, P, H float64
+	mu      sync.RWMutex
 }
 
-func bme280collector(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		vars := mux.Vars(r)
-		device := vars["device"]
-		registerAddressStr := vars["register"]
-		registerAddress, err := strconv.ParseInt(registerAddressStr, 0, 32)
-		if err != nil {
-			log.Println(err.Error())
-			return
-		}
+var sensor SensorData
 
-		d, err := i2c.Open(&i2c.Devfs{Dev: path.Join("/dev/", device)}, int(registerAddress))
+func main() {
+	const (
+		device  = "i2c-1" // имя файла в /dev
+		address = 0x76    // I2C адрес сенсора
+	)
+
+	// запуск фонового обновления данных
+	go updateLoop(device, address)
+
+	http.HandleFunc("/metrics", metricsHandler)
+
+	log.Println("Listening on :8080")
+	log.Fatal(http.ListenAndServe(":8080", nil))
+}
+
+func updateLoop(device string, addr int) {
+	for {
+		d, err := i2c.Open(&i2c.Devfs{Dev: "/dev/" + device}, addr)
 		if err != nil {
-			log.Println(err.Error())
-			return
+			log.Println("i2c open error:", err)
+			time.Sleep(5 * time.Second)
+			continue
 		}
 
 		b := bme280.New(d)
-		err = b.Init()
-
-		defer d.Close()
-
-		t, p, h, err := b.EnvData()
-		if err != nil {
-			log.Println(err.Error())
-			return
+		if err := b.Init(); err != nil {
+			log.Println("bme280 init error:", err)
+			d.Close()
+			time.Sleep(5 * time.Second)
+			continue
 		}
 
-		tempGauge.WithLabelValues(device, registerAddressStr).Set(t)
-		pressGauge.WithLabelValues(device, registerAddressStr).Set(p)
-		humidityGauge.WithLabelValues(device, registerAddressStr).Set(h)
+		t, p, h, err := b.EnvData()
+		d.Close()
+		if err != nil {
+			log.Println("env read error:", err)
+		} else {
+			sensor.mu.Lock()
+			sensor.T, sensor.P, sensor.H = t, p, h
+			sensor.mu.Unlock()
+		}
 
-		next.ServeHTTP(w, r)
-	})
+		time.Sleep(5 * time.Second)
+	}
+}
+
+func metricsHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+
+	sensor.mu.RLock()
+	defer sensor.mu.RUnlock()
+
+	fmt.Fprintf(w, "# HELP bme280_temperature_celsius Temperature in Celsius\n")
+	fmt.Fprintf(w, "# TYPE bme280_temperature_celsius gauge\n")
+	fmt.Fprintf(w, "bme280_temperature_celsius %f\n", sensor.T)
+
+	fmt.Fprintf(w, "# HELP bme280_pressure_hpa Pressure in hPa\n")
+	fmt.Fprintf(w, "# TYPE bme280_pressure_hpa gauge\n")
+	fmt.Fprintf(w, "bme280_pressure_hpa %f\n", sensor.P)
+
+	fmt.Fprintf(w, "# HELP bme280_humidity_percent Relative humidity in %%\n")
+	fmt.Fprintf(w, "# TYPE bme280_humidity_percent gauge\n")
+	fmt.Fprintf(w, "bme280_humidity_percent %f\n", sensor.H)
 }
