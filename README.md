@@ -23,6 +23,8 @@ version: "3"
 services:
   bme280:
     image: spawn2kill/bme280-exporter:1.0.0
+    environment:
+      BME_UPDATE_INTERVAL: 15 # in seconds
     expose:
      - 8080
     devices:
