@@ -1,4 +1,4 @@
-FROM golang:alpine3.11 as builder
+FROM golang:alpine3.11 AS builder
 WORKDIR /go/src/github.com/bbcbear/bme280-exporter
 COPY go.mod go.sum ./
 RUN go mod download
