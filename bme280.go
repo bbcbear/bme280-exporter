@@ -34,11 +34,22 @@ func main() {
 }
 
 func updateLoop(device string, addr int) {
+	interval := 5 * time.Second // значение по умолчанию
+
+	if val := os.Getenv("BME_UPDATE_INTERVAL"); val != "" {
+		if sec, err := strconv.Atoi(val); err == nil && sec > 0 {
+			interval = time.Duration(sec) * time.Second
+			log.Println("Set update interval to", interval)
+		} else {
+			log.Println("Invalid BME_UPDATE_INTERVAL, using default:", interval)
+		}
+	}
+
 	for {
 		d, err := i2c.Open(&i2c.Devfs{Dev: "/dev/" + device}, addr)
 		if err != nil {
 			log.Println("i2c open error:", err)
-			time.Sleep(5 * time.Second)
+			time.Sleep(interval)
 			continue
 		}
 
@@ -46,7 +57,7 @@ func updateLoop(device string, addr int) {
 		if err := b.Init(); err != nil {
 			log.Println("bme280 init error:", err)
 			d.Close()
-			time.Sleep(5 * time.Second)
+			time.Sleep(interval)
 			continue
 		}
 
@@ -60,7 +71,7 @@ func updateLoop(device string, addr int) {
 			sensor.mu.Unlock()
 		}
 
-		time.Sleep(5 * time.Second)
+		time.Sleep(interval)
 	}
 }
 
